@@ -163,46 +163,72 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, sche
     for batch in dataloader:
         if not batch:
             continue
-        for sample in batch:
-            img_a = sample["img_a"].unsqueeze(0).to(device)
-            img_b = sample["img_b"].unsqueeze(0).to(device)
+            
+        # Filter valid samples and stack them
+        valid_samples = [s for s in batch if len(s["idx_a"]) > 0]
+        if not valid_samples:
+            continue
+
+        img_a = torch.stack([s["img_a"] for s in valid_samples]).to(device)
+        img_b = torch.stack([s["img_b"] for s in valid_samples]).to(device)
+
+        # Forward pass for the whole batch (inter-image)
+        desc_a_all = model(img_a)  # (B, H*W, 1024)
+        desc_b_all = model(img_b)
+
+        desc_a_list = []
+        desc_b_list = []
+        batch_idx_a_list = []
+        batch_idx_b_list = []
+
+        for b, sample in enumerate(valid_samples):
             idx_a = sample["idx_a"].to(device)
             idx_b = sample["idx_b"].to(device)
 
-            if len(idx_a) == 0:
-                continue
+            desc_a_list.append(desc_a_all[b, idx_a])
+            desc_b_list.append(desc_b_all[b, idx_b])
+            batch_idx_a_list.append(torch.full((len(idx_a),), b, dtype=torch.long, device=device))
+            batch_idx_b_list.append(torch.full((len(idx_b),), b, dtype=torch.long, device=device))
 
-            desc_a_all = model(img_a)
-            desc_b_all = model(img_b)
+        desc_a_flat = torch.cat(desc_a_list, dim=0)
+        desc_b_flat = torch.cat(desc_b_list, dim=0)
+        idx_a_flat = torch.cat([s["idx_a"].to(device) for s in valid_samples], dim=0)
+        idx_b_flat = torch.cat([s["idx_b"].to(device) for s in valid_samples], dim=0)
+        batch_idx_a_flat = torch.cat(batch_idx_a_list, dim=0)
+        batch_idx_b_flat = torch.cat(batch_idx_b_list, dim=0)
 
-            desc_a = desc_a_all[0, idx_a]
-            desc_b = desc_b_all[0, idx_b]
+        losses = criterion(
+            desc_a_flat, desc_b_flat, 
+            idx_a_flat, idx_b_flat, 
+            batch_idx_a_flat, batch_idx_b_flat,
+            model.patch_size, 448
+        )
+        
+        loss = losses["total"]
 
-            losses = criterion(desc_a, desc_b, idx_a, idx_b, model.patch_size, 448)
-            loss = losses["total"]
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+        total_loss += loss.item()
+        total_contrastive += losses["contrastive"].item()
+        if "diversity" in losses:
+            total_diversity += losses["diversity"].item()
+        num_valid += len(valid_samples)
+        step += 1
 
-            total_loss += loss.item()
-            total_contrastive += losses["contrastive"].item()
-            if "diversity" in losses:
-                total_diversity += losses["diversity"].item()
-            num_valid += 1
-            step += 1
-
-            if step % LOG_EVERY == 0:
-                print(
-                    f"  [epoch {epoch}] step {step} | "
-                    f"loss={loss.item():.4f} | "
-                    f"contrastive={losses['contrastive'].item():.4f} | "
-                    f"corr={len(idx_a)}",
-                    flush=True
-                )
+        if step % LOG_EVERY == 0:
+            print(
+                f"  [epoch {epoch}] step {step} | "
+                f"loss={loss.item():.4f} | "
+                f"contrastive={losses['contrastive'].item():.4f} | "
+                f"batch_pairs={len(valid_samples)} | "
+                f"total_pts={len(idx_a_flat)}",
+                flush=True
+            )
 
     if num_valid == 0:
         return {"loss": 0, "contrastive": 0, "diversity": 0, "num_valid": 0}

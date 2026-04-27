@@ -89,6 +89,8 @@ class HardInfoNCELoss(nn.Module):
         desc_b: torch.Tensor,
         idx_a: torch.Tensor | None = None,
         idx_b: torch.Tensor | None = None,
+        batch_idx_a: torch.Tensor | None = None,
+        batch_idx_b: torch.Tensor | None = None,
         w_patches: int = 28,
     ) -> torch.Tensor:
         N = desc_a.shape[0]
@@ -106,6 +108,13 @@ class HardInfoNCELoss(nn.Module):
             dist_sq = (x_a.unsqueeze(1) - x_a.unsqueeze(0))**2 + (y_a.unsqueeze(1) - y_a.unsqueeze(0))**2
             # Mask out points closer than safe_radius (except diagonal which is the positive pair)
             mask = (dist_sq < self.safe_radius**2)
+            
+            # CRITICAL FIX for Inter-Image Negatives: 
+            # Only mask points that are in the SAME image!
+            if batch_idx_a is not None:
+                same_image = (batch_idx_a.unsqueeze(1) == batch_idx_a.unsqueeze(0))
+                mask = mask & same_image
+
             mask.fill_diagonal_(False)
             sim.masked_fill_(mask, float('-inf'))
 
@@ -143,6 +152,8 @@ class MatchingLoss(nn.Module):
         desc_b: torch.Tensor,
         idx_a: torch.Tensor | None = None,
         idx_b: torch.Tensor | None = None,
+        batch_idx_a: torch.Tensor | None = None,
+        batch_idx_b: torch.Tensor | None = None,
         patch_size: int = 16,
         img_size: int = 448,
     ) -> dict[str, torch.Tensor]:
@@ -150,7 +161,7 @@ class MatchingLoss(nn.Module):
         w_patches = img_size // patch_size
         
         if isinstance(self.contrastive, HardInfoNCELoss):
-            loss_c = self.contrastive(desc_a, desc_b, idx_a, idx_b, w_patches)
+            loss_c = self.contrastive(desc_a, desc_b, idx_a, idx_b, batch_idx_a, batch_idx_b, w_patches)
         else:
             loss_c = self.contrastive(desc_a, desc_b)
             

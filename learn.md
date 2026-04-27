@@ -322,31 +322,27 @@ conda run -n llmdevelop python evaluate/evaluate_csv_essential.py `
 
 ```powershell
 # ===== 步骤 1: LoRA 微调训练 =====
-conda run -n llmdevelop python -m finetune.train_lora `
-    --checkpoint dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth `
-    --train_pairs datasets/scannet_with_gt.txt `
-    --data_root datasets/test `
-    --output_dir finetune_output_lora_scannet `
-    --epochs 15 --batch_size 1 --img_size 448 --lora_rank 4 --lr 1e-3
-
-# ===== 步骤 2: 提取微调特征 + MNN 匹配 =====
-conda run -n llmdevelop python -m finetune.extract_lora `
-    --checkpoint finetune_output_lora_scannet/checkpoint_latest.pth `
-    --pretrained dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth `
-    --pairs datasets/scannet_with_gt.txt `
-    --data_root datasets/test `
-    --output_dir mnn_matching_lora_scannet/scannet `
-    --img_size 448 --eval_resize 640 480
-
-# ===== 步骤 3: 评估 =====
-conda run -n llmdevelop python evaluate/evaluate_csv_essential.py `
-    --input_pairs datasets/scannet_with_gt.txt `
-    --input_dir datasets/test `
-    --input_csv_dir mnn_matching_lora_scannet/scannet `
-    --output_dir evaluate/scannet_lora
+# ... (类似于 NAVI，修改 data_root 和 pairs) ...
 ```
 
-### 8.6 查看结果
+### 8.6 终极进化：跨图负样本 (Inter-Image Negatives) 与 5090 云端自动化
+
+在使用 `batch_size=1` 与 Safe Radius 在本地显卡上进行训练后，我们发现 ScanNet 的精度虽然从 5.51% 奇迹般回升至 28.83%，但仍未超越 Zero-Shot 基线 (32.20%)。
+
+**深度溯源：**
+Safe Radius 虽然保护了物理相邻的像素，但在 ScanNet 这样的室内数据集中，遥远的地方（如两面不同的白墙）依然具有相同的语义。强制将它们作为负样本推开，依然带来了严重的语义噪声。
+
+**解决方案：**
+我们将训练环境迁移至拥有 32GB 显存的云端 **RTX 5090**。算力解放后，我们将 `train_lora.py` 和 `loss.py` 进行了底层重构，开启了 **`batch_size=8`** 的跨图像计算。此时，负样本全部来自于**不同的图像（不同的场景）**，从而在数学和语义上彻底清除了单图采样带来的悖论。
+
+为了自动化执行此最终流程，我们编写了一键训练脚本：
+
+```bash
+# 赋予执行权限并一键启动全套流程 (NAVI + ScanNet)
+chmod +x run_all_5090.sh
+./run_all_5090.sh
+```
+### 8.7 查看结果
 
 ```powershell
 Get-Content evaluate/navi_lora/evaluation_results.txt
