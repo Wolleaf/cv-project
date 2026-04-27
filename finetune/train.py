@@ -13,8 +13,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
+
+# Force line buffering to avoid conda run buffering issues on Windows
+sys.stdout.reconfigure(line_buffering=True)
 
 import torch
 import torch.optim as optim
@@ -121,7 +125,8 @@ def train_one_epoch(
                     f"  [epoch {epoch}] step {step} | "
                     f"loss={loss.item():.4f} | "
                     f"contrastive={losses['contrastive'].item():.4f} | "
-                    f"corr={len(idx_a)}"
+                    f"corr={len(idx_a)}",
+                    flush=True
                 )
 
     if num_valid == 0:
@@ -188,7 +193,7 @@ def main():
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,      # Windows compatibility
+        num_workers=4,      # 4 workers for faster data loading
         collate_fn=collate_matching_pairs,
         drop_last=True,
     )

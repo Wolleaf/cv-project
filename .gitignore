@@ -4,3 +4,6 @@ mnn_matching/
 mnn_matching_finetuned/
 finetune_output/
 finetune_output_test/
+full_dataset/
+mnn_matching_*/
+finetune_*/

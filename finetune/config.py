@@ -88,5 +88,7 @@ def get_extract_args():
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Directory to save CSV matching results")
     parser.add_argument("--img_size", type=int, default=IMG_SIZE)
+    parser.add_argument("--eval_resize", type=int, nargs=2, default=[640, 480],
+                        help="Evaluation resize dimensions (W H). Must match evaluate script's --resize.")
     parser.add_argument("--gpu", type=int, default=0)
     return parser.parse_args()

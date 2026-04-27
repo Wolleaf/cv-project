@@ -4,6 +4,11 @@ Extract dense features from fine-tuned DINOv2 and perform MNN matching.
 Produces CSV files in exactly the same format used by lmz's zero-shot
 pipeline, so they can be evaluated directly with evaluate_csv_essential.py.
 
+CRITICAL: The output keypoint coordinates must be in the **evaluation resize
+coordinate system** (default 640x480), NOT the model's internal resolution
+(448x448) or the original image dimensions. The evaluate script reads images
+at the --resize resolution and scales intrinsics accordingly.
+
 CSV format:
     left_idx, right_idx, x1, y1, x2, y2, score
 
@@ -11,8 +16,10 @@ Usage:
     python -m finetune.extract_and_match \
         --checkpoint finetune_output/checkpoint_latest.pth \
         --pairs datasets/navi_with_gt.txt \
-        --data_root datasets/test \
-        --output_dir mnn_matching_finetuned/navi
+        --data_root datasets/test/navi_resized \
+        --output_dir mnn_matching_finetuned/navi \
+        --img_size 448 \
+        --eval_resize 640 480
 """
 
 from __future__ import annotations
@@ -104,27 +111,32 @@ def load_and_preprocess(
     return tensor, (orig_h, orig_w)
 
 
-def get_patch_coordinates(
+def get_patch_coordinates_eval(
     h_patches: int,
     w_patches: int,
     patch_size: int,
-    orig_h: int,
-    orig_w: int,
     img_size: int,
+    eval_w: int,
+    eval_h: int,
 ) -> np.ndarray:
     """
-    Compute pixel coordinates of patch centres, mapped back to original image size.
+    Compute pixel coordinates of patch centres, mapped to the **evaluation
+    resize coordinate system** (e.g., 640x480).
+
+    The model processes images at img_size x img_size. The evaluate script
+    processes images at eval_w x eval_h. We map patch centres from model
+    space to evaluation space.
 
     Returns:
-        (h_patches * w_patches, 2) array of (x, y) coordinates
+        (h_patches * w_patches, 2) array of (x, y) coordinates in eval space
     """
-    # Patch centres in resized image
+    # Patch centres in model's internal resolution (img_size x img_size)
     ys = np.arange(h_patches) * patch_size + patch_size // 2
     xs = np.arange(w_patches) * patch_size + patch_size // 2
 
-    # Scale back to original image
-    scale_x = orig_w / img_size
-    scale_y = orig_h / img_size
+    # Scale from model resolution to evaluation resolution
+    scale_x = eval_w / img_size
+    scale_y = eval_h / img_size
 
     grid_y, grid_x = np.meshgrid(ys, xs, indexing="ij")
     coords = np.stack([
@@ -168,6 +180,10 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    eval_w, eval_h = args.eval_resize
+    print(f"Model input size: {args.img_size}x{args.img_size}")
+    print(f"Eval coordinate system: {eval_w}x{eval_h}")
+
     # ── Load model ───────────────────────────────────────────────────
     print("Loading model...")
     model = DINOv2Matcher(checkpoint_path=None, freeze_blocks=0)
@@ -188,6 +204,11 @@ def main():
     h_patches = args.img_size // patch_size
     w_patches = args.img_size // patch_size
 
+    # Pre-compute patch coordinates in evaluation space (same for all images)
+    coords_eval = get_patch_coordinates_eval(
+        h_patches, w_patches, patch_size, args.img_size, eval_w, eval_h
+    )
+
     # ── Load pairs ───────────────────────────────────────────────────
     with open(args.pairs, "r") as f:
         pairs = [line.strip().split() for line in f if line.strip()]
@@ -195,7 +216,12 @@ def main():
     pairs = [p for p in pairs if len(p) == 38]
     print(f"Processing {len(pairs)} pairs...")
 
+    # Validate coordinate range
+    print(f"Patch coordinate range: x=[{coords_eval[:, 0].min():.1f}, {coords_eval[:, 0].max():.1f}], "
+          f"y=[{coords_eval[:, 1].min():.1f}, {coords_eval[:, 1].max():.1f}]")
+
     t0 = time.time()
+    n_skipped = 0
     for i, pair in enumerate(pairs):
         name0, name1 = pair[0], pair[1]
         pid = pair_output_id(name0, name1)
@@ -204,10 +230,10 @@ def main():
         path1 = str(Path(args.data_root) / name1)
 
         try:
-            img_a, (orig_h0, orig_w0) = load_and_preprocess(path0, args.img_size)
-            img_b, (orig_h1, orig_w1) = load_and_preprocess(path1, args.img_size)
+            img_a, _ = load_and_preprocess(path0, args.img_size)
+            img_b, _ = load_and_preprocess(path1, args.img_size)
         except FileNotFoundError as e:
-            print(f"  SKIP {pid}: {e}")
+            n_skipped += 1
             continue
 
         # Extract features
@@ -218,19 +244,15 @@ def main():
         # MNN matching
         idx_a, idx_b, scores = mutual_nearest_neighbors(desc_a, desc_b)
 
-        # Get coordinates in original image space
-        coords_a = get_patch_coordinates(h_patches, w_patches, patch_size, orig_h0, orig_w0, args.img_size)
-        coords_b = get_patch_coordinates(h_patches, w_patches, patch_size, orig_h1, orig_w1, args.img_size)
-
-        # Write CSV
+        # Write CSV — coordinates are in EVAL space (e.g. 640x480)
         csv_path = output_dir.resolve() / f"{pid}_matches.csv"
         safe_csv_path = "\\\\?\\" + str(csv_path)
         with open(safe_csv_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(["left_idx", "right_idx", "x1", "y1", "x2", "y2", "score"])
             for a, b, s in zip(idx_a, idx_b, scores):
-                x1, y1 = coords_a[a]
-                x2, y2 = coords_b[b]
+                x1, y1 = coords_eval[a]
+                x2, y2 = coords_eval[b]
                 writer.writerow([int(a), int(b), f"{x1:.1f}", f"{y1:.1f}", f"{x2:.1f}", f"{y2:.1f}", f"{s}"])
 
         if (i + 1) % 100 == 0 or i == 0:
@@ -238,13 +260,8 @@ def main():
             print(f"  [{i+1}/{len(pairs)}] {elapsed:.1f}s | {pid} | {len(idx_a)} matches")
 
     elapsed = time.time() - t0
-    print(f"\nDone! {len(pairs)} pairs in {elapsed:.1f}s")
+    print(f"\nDone! {len(pairs)} pairs in {elapsed:.1f}s (skipped {n_skipped})")
     print(f"Results saved to {output_dir}")
-    print(f"\nTo evaluate, run:")
-    print(f"  python evaluate/evaluate_csv_essential.py \\")
-    print(f"    --input_pairs {args.pairs} \\")
-    print(f"    --input_csv_dir {output_dir} \\")
-    print(f"    --output_dir evaluate/<dataset>_finetuned")
 
 
 if __name__ == "__main__":

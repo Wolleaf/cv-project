@@ -65,25 +65,31 @@ class InfoNCELoss(nn.Module):
 
 class HardInfoNCELoss(nn.Module):
     """
-    InfoNCE with hard-negative mining.
-
-    Same as InfoNCE but only keeps the top-K hardest negatives per anchor
-    to focus learning on the most confusing pairs.
+    InfoNCE with hard-negative mining and Safe Radius.
+    
+    Crucial Fix: When batch_size=1, negatives are sampled from the same image.
+    We MUST mask out spatially close patches (Safe Radius) so the model is not
+    forced to push adjacent (similar) patches apart, which causes mode collapse.
     """
 
     def __init__(
         self,
         temperature: float = cfg.TEMPERATURE,
         hard_neg_ratio: float = 0.5,
+        safe_radius: float = 5.0,  # in patches
     ):
         super().__init__()
         self.temperature = temperature
         self.hard_neg_ratio = hard_neg_ratio
+        self.safe_radius = safe_radius
 
     def forward(
         self,
         desc_a: torch.Tensor,
         desc_b: torch.Tensor,
+        idx_a: torch.Tensor | None = None,
+        idx_b: torch.Tensor | None = None,
+        w_patches: int = 28,
     ) -> torch.Tensor:
         N = desc_a.shape[0]
         if N <= 1:
@@ -91,35 +97,33 @@ class HardInfoNCELoss(nn.Module):
 
         sim = torch.mm(desc_a, desc_b.t()) / self.temperature
 
-        # Number of hard negatives to keep
-        K = max(int(N * self.hard_neg_ratio), 1)
+        # Safe Radius Masking
+        if idx_a is not None and self.safe_radius > 0:
+            # Convert 1D patch index to 2D grid coordinates
+            x_a = (idx_a % w_patches).float()
+            y_a = (idx_a // w_patches).float()
+            # Compute pairwise distance matrix
+            dist_sq = (x_a.unsqueeze(1) - x_a.unsqueeze(0))**2 + (y_a.unsqueeze(1) - y_a.unsqueeze(0))**2
+            # Mask out points closer than safe_radius (except diagonal which is the positive pair)
+            mask = (dist_sq < self.safe_radius**2)
+            mask.fill_diagonal_(False)
+            sim.masked_fill_(mask, float('-inf'))
 
-        # For each row, keep only top-K negative similarities + the positive
+        K = max(int(N * self.hard_neg_ratio), 1)
         labels = torch.arange(N, device=sim.device)
 
-        # Mask out positives temporarily to find hard negatives
-        pos_sim = sim[labels, labels].clone()  # (N,)
+        pos_sim = sim[labels, labels].clone()
         sim_neg = sim.clone()
         sim_neg[labels, labels] = float("-inf")
 
-        # Top-K hardest negatives per row
-        topk_vals, topk_idx = sim_neg.topk(K, dim=1)  # (N, K)
-
-        # Build reduced logits: [positive, hard_neg_1, ..., hard_neg_K]
-        logits = torch.cat([pos_sim.unsqueeze(1), topk_vals], dim=1)  # (N, 1+K)
-        target = torch.zeros(N, dtype=torch.long, device=sim.device)  # positive is index 0
+        topk_vals, topk_idx = sim_neg.topk(K, dim=1)
+        logits = torch.cat([pos_sim.unsqueeze(1), topk_vals], dim=1)
+        target = torch.zeros(N, dtype=torch.long, device=sim.device)
 
         return F.cross_entropy(logits, target)
 
 
 class MatchingLoss(nn.Module):
-    """
-    Combined loss for the fine-tuning pipeline.
-
-    Uses InfoNCE as the primary loss with an optional regularisation term
-    that encourages descriptor diversity.
-    """
-
     def __init__(
         self,
         temperature: float = cfg.TEMPERATURE,
@@ -137,19 +141,23 @@ class MatchingLoss(nn.Module):
         self,
         desc_a: torch.Tensor,
         desc_b: torch.Tensor,
+        idx_a: torch.Tensor | None = None,
+        idx_b: torch.Tensor | None = None,
+        patch_size: int = 16,
+        img_size: int = 448,
     ) -> dict[str, torch.Tensor]:
-        """
-        Returns:
-            Dictionary with 'total', 'contrastive', and optionally 'diversity' losses.
-        """
-        loss_c = self.contrastive(desc_a, desc_b)
+        
+        w_patches = img_size // patch_size
+        
+        if isinstance(self.contrastive, HardInfoNCELoss):
+            loss_c = self.contrastive(desc_a, desc_b, idx_a, idx_b, w_patches)
+        else:
+            loss_c = self.contrastive(desc_a, desc_b)
+            
         losses = {"contrastive": loss_c}
-
         total = loss_c
 
-        # Diversity regularisation: penalise if descriptors collapse
         if self.diversity_weight > 0 and desc_a.shape[0] > 1:
-            # Correlation matrix of descriptors
             corr_a = torch.mm(desc_a.t(), desc_a) / desc_a.shape[0]
             corr_b = torch.mm(desc_b.t(), desc_b) / desc_b.shape[0]
             identity = torch.eye(corr_a.shape[0], device=corr_a.device)
