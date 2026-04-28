@@ -254,7 +254,7 @@ def resolve_csv_path(input_csv_dir, csv_index, pair_id):
     ]
     for candidate in candidates:
         import os
-        safe_path = "\\\\?\\" + str(candidate.resolve())
+        safe_path = "\\\\?\\" + str(candidate.resolve()) if os.name == "nt" else str(candidate.resolve())
         if os.path.exists(safe_path):
             return candidate
 
@@ -278,7 +278,9 @@ def load_csv_matches(csv_path):
     scores = []
     total_rows = 0
 
-    with open("\\\\?\\" + str(csv_path.resolve()), 'r', newline='') as handle:
+    import os
+    safe_csv = "\\\\?\\" + str(csv_path.resolve()) if os.name == "nt" else str(csv_path.resolve())
+    with open(safe_csv, 'r', newline='') as handle:
         reader = csv.DictReader(handle)
         fieldnames = reader.fieldnames
         if fieldnames is None:

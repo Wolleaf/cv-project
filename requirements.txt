@@ -1,0 +1,11 @@
+numpy>=1.24.0
+opencv-python>=4.8.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+tqdm>=4.65.0
+Pillow>=10.0.0
+
+# 注意：本文件已刻意排除了 torch, torchvision 和 torchaudio。
+# 因为你提到云端服务器已经配置好了 PyTorch 和 CUDA 环境。
+# 若有其他通过 pip 安装且缺失的包，会基于此文件一键补齐。

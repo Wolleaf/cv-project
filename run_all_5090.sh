@@ -13,6 +13,10 @@ echo -e "\e[36m=================================================================
 echo -e "\e[36m开始全自动流程：NAVI & ScanNet 的 LoRA 微调与评测 (Inter-Image)\e[0m"
 echo -e "\e[36m=================================================================\e[0m"
 
+# 修复 libgomp 警告
+# 修复 libgomp 警告（AutoDL 环境下设为 8 或 16 既能避免崩溃又能保持多线程性能）
+export OMP_NUM_THREADS=8
+
 # 确保在对应的 conda 环境中执行
 # 如果环境名称不同，请自行修改 llmdevelop
 CONDA_ENV="llmdevelop"
@@ -55,7 +59,6 @@ fi
 REQUIRED_FILES=(
     "finetune/navi_train_pairs.txt"
     "datasets/navi_with_gt.txt"
-    "finetune/scannet_train_pairs.txt"
     "datasets/scannet_with_gt.txt"
 )
 for file in "${REQUIRED_FILES[@]}"; do
@@ -68,8 +71,7 @@ done
 REQUIRED_DIRS=(
     "full_dataset/navi_v1.5"
     "datasets/test/navi_resized"
-    "full_dataset/scannet"
-    "datasets/test/scannet_resized"
+    "datasets/test/scans_test"
 )
 for dir in "${REQUIRED_DIRS[@]}"; do
     if [ ! -d "$dir" ]; then
@@ -83,14 +85,14 @@ echo -e "\e[32m[自检通过] 所有环境、依赖及数据均已就绪！\e[0m
 # -------------------------------------------------------------------------
 # 第一阶段：NAVI 数据集
 # -------------------------------------------------------------------------
-echo -e "\n\e[33m[1/4] 正在使用 Batch Size 8 在 NAVI 数据集上微调 LoRA...\e[0m"
-conda run -n $CONDA_ENV python -m finetune.train_lora \
-    --checkpoint dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth \
-    --train_pairs finetune/navi_train_pairs.txt \
-    --data_root full_dataset/navi_v1.5 \
-    --depth_root full_dataset/navi_v1.5 \
-    --output_dir finetune_output_lora_navi_5090 \
-    --epochs 15 --batch_size 8 --img_size 448 --lora_rank 4 --lr 1e-3
+echo -e "\n\e[33m[1/4] (已完成) 跳过 NAVI 数据集微调 LoRA...\e[0m"
+# conda run -n $CONDA_ENV python -m finetune.train_lora \
+#     --checkpoint dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth \
+#     --train_pairs finetune/navi_train_pairs.txt \
+#     --data_root full_dataset/navi_v1.5 \
+#     --depth_root full_dataset/navi_v1.5 \
+#     --output_dir finetune_output_lora_navi_5090 \
+#     --epochs 15 --batch_size 8 --img_size 448 --lora_rank 4 --lr 1e-3
 
 echo -e "\n\e[33m[2/4] 正在提取 NAVI 验证集特征并使用 MNN 进行匹配...\e[0m"
 conda run -n $CONDA_ENV python -m finetune.extract_lora \
@@ -114,9 +116,8 @@ conda run -n $CONDA_ENV python evaluate/evaluate_csv_essential.py \
 echo -e "\n\e[33m[3/4] 正在使用 Batch Size 8 在 ScanNet 数据集上微调 LoRA...\e[0m"
 conda run -n $CONDA_ENV python -m finetune.train_lora \
     --checkpoint dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth \
-    --train_pairs finetune/scannet_train_pairs.txt \
-    --data_root full_dataset/scannet \
-    --depth_root full_dataset/scannet \
+    --train_pairs datasets/scannet_with_gt.txt \
+    --data_root datasets/test \
     --output_dir finetune_output_lora_scannet_5090 \
     --epochs 15 --batch_size 8 --img_size 448 --lora_rank 4 --lr 1e-3
 
@@ -125,14 +126,14 @@ conda run -n $CONDA_ENV python -m finetune.extract_lora \
     --checkpoint finetune_output_lora_scannet_5090/checkpoint_latest.pth \
     --pretrained dinov3_weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth \
     --pairs datasets/scannet_with_gt.txt \
-    --data_root datasets/test/scannet_resized \
+    --data_root datasets/test \
     --output_dir mnn_matching_lora_scannet_5090/scannet \
     --img_size 448 --eval_resize 640 480
 
 echo -e "\n\e[32m>> 评测 ScanNet 最终结果...\e[0m"
 conda run -n $CONDA_ENV python evaluate/evaluate_csv_essential.py \
     --input_pairs datasets/scannet_with_gt.txt \
-    --input_dir datasets/test/scannet_resized \
+    --input_dir datasets/test \
     --input_csv_dir mnn_matching_lora_scannet_5090/scannet \
     --output_dir evaluate/scannet_lora_5090
 

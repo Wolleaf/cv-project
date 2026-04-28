@@ -1,4 +1,4 @@
-# DINOv2 微调 — 完整操作流程
+﻿# DINOv3 微调 — 完整操作流程
 
 > **你的环境**: Windows 11 / RTX 5060 (8GB) / conda `llmdevelop` 环境  
 > **已验证**: PyTorch 2.9.1+cu130, CUDA 13.0, OpenCV 4.13, torchvision 0.24.1  
@@ -40,7 +40,7 @@ lmz/
 ├── mnn_matching/              ← lmz 的 zero-shot 匹配结果
 │
 ├── finetune/                  ← 【新增】你的微调代码
-│   ├── model.py               ← DINOv2-v3 模型定义
+│   ├── model.py               ← DINOv3 模型定义
 │   ├── dataset.py             ← 数据集加载
 │   ├── loss.py                ← 对比学习损失
 │   ├── train.py               ← 训练脚本

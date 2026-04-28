@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
@@ -143,7 +144,7 @@ def main():
         idx_a, idx_b, scores = mutual_nearest_neighbors(desc_a, desc_b)
 
         csv_path = output_dir.resolve() / f"{pid}_matches.csv"
-        safe_csv_path = "\\\\?\\" + str(csv_path)
+        safe_csv_path = "\\\\?\\" + str(csv_path) if os.name == "nt" else str(csv_path)
         with open(safe_csv_path, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(["left_idx", "right_idx", "x1", "y1", "x2", "y2", "score"])
