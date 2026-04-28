@@ -7,3 +7,5 @@ finetune_output_test/
 full_dataset/
 mnn_matching_*/
 finetune_*/
+*/__pycache__/
+.claude/
