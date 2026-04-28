@@ -556,8 +556,8 @@ def extract_filtered(args):
 
         # Write CSV
         csv_path = output_dir.resolve() / f"{pid}_matches.csv"
-        safe_path = "\\\\?\\" + str(csv_path)
-        with open(safe_path, "w", newline="") as f:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(csv_path), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["left_idx", "right_idx", "x1", "y1", "x2", "y2", "score"])
             for ai, bi, s in zip(orig_idx_a, orig_idx_b, scores_mnn):

@@ -51,7 +51,7 @@ conda run -n $CONDA_ENV python -c "
 import torch
 assert torch.cuda.is_available(), 'CUDA 不可用'
 print(f'GPU: {torch.cuda.get_device_name(0)}')
-print(f'VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB')
+print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
 " || exit 1
 
 if [ ! -f "$WEIGHTS" ]; then
@@ -201,8 +201,8 @@ PID_SCANNET_EXTRACT=$!
 
 echo -e "\n  等待提取与评估完成..."
 while kill -0 $PID_NAVI_EXTRACT 2>/dev/null || kill -0 $PID_SCANNET_EXTRACT 2>/dev/null; do
-    N_PROG=$(grep -c "完成" "$LOG_DIR/extract_NAVI.log" 2>/dev/null || echo 0)
-    S_PROG=$(grep -c "完成" "$LOG_DIR/extract_ScanNet.log" 2>/dev/null || echo 0)
+    N_PROG=$(grep -c "完成" "$LOG_DIR/extract_NAVI.log" 2>/dev/null | tr -d '\n' || echo 0)
+    S_PROG=$(grep -c "完成" "$LOG_DIR/extract_ScanNet.log" 2>/dev/null | tr -d '\n' || echo 0)
     echo -ne "\r  NAVI: ${N_PROG}/10 步  |  ScanNet: ${S_PROG}/10 步  "
     sleep 3
 done
