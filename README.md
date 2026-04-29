@@ -174,14 +174,16 @@ ScanNet 的完整训练集只包含 3D 点云，没有提取好的 RGB 帧。因
 | 3 | **LoRA + Safe Radius（bs=1）** | ScanNet | 0.00 | 0.26 | 1.84 | **28.83%** | ↓ 10.5% |
 | 4 | Robust v2 StableMatchingLoss | NAVI | 0.00 | 0.02 | 0.11 | 5.13% | ↓ 89.6% |
 | 4 | Robust v2 StableMatchingLoss | ScanNet | 0.04 | 0.26 | 1.43 | 10.97% | ↓ 65.9% |
+| 5 | Matchability Predictor (Route A) | NAVI | 0.00 | 0.02 | 0.17 | 5.55% | ↓ 88.7% |
+| 5 | Matchability Predictor (Route A) | ScanNet | 0.00 | 0.00 | 0.20 | 5.95% | ↓ 81.5% |
+| **6** | **Matching Head (Route B)** | **待定** | **待定** | **待定** | **待定** | **待定** | **最后一次** |
 
 ### 5.2 关键发现
 
-1. **最好的微调结果（LoRA + Safe Radius，ScanNet Precision 28.83%）仍然低于 Zero-Shot 基线（32.20%）**。
-2. **所有微调实验的 AUC 指标都接近 0**——模型完全失去了位姿估计能力。
-3. **LoRA B=0 初始化意味着训练起点 = Zero-Shot**——模型在学习过程中主动退化。
-4. **更换损失函数（InfoNCE → StableMatchingLoss）无效**——问题不在损失函数的形式。
-5. **增大 batch_size 到 8（RTX 5090 32GB）无效**——问题不在硬件。
+1. **最好的微调结果（LoRA + Safe Radius，ScanNet Precision 28.83%）仍然低于 Zero-Shot 基线（32.20%）** — 但也正是 Safe Radius 的成功揭示了对比学习与语义特征的矛盾本质。
+2. **所有修改特征空间的方法都使 AUC 退化到接近 0** — 模型完全失去了位姿估计能力。
+3. **Route A（Matchability Predictor）也失败** — Precision 从 49% 跌至 5%，证明单 patch 缺乏上下文就无法判断匹配价值。这个失败直接引出了 Route B 的核心设计。
+4. **六次尝试全部失败** — 路线 B 是本项目最后一次尝试，也是理论最完整的方案。
 
 ### 5.3 微调历程简述
 
@@ -213,14 +215,25 @@ ScanNet 的完整训练集只包含 3D 点云，没有提取好的 RGB 帧。因
 
 **至此，所有工程变量被排除。问题必定在方法论层面。**
 
-#### 第五阶段（进行中）：路线 A — Matchability Predictor
+#### 第五阶段：路线 A — Matchability Predictor（已测试，失败）
 
-基于前四阶段的深刻教训，我们换了一个完全不同的思路：**DINOv3 特征完全不动，只训练一个极小的网络（~0.35M 参数）来预测每个 patch 是否"值得匹配"**。在推理时过滤掉纹理缺失/重复区域的低分 patch，只在高区分度的 patch 上做 MNN 匹配。
+**DINOv3 特征完全不动，只训练一个极小的网络（~0.28M 参数）来预测每个 patch 是否"值得匹配"**。
 
-这种方法的特点：
-- **零风险**：backbone 完全冻结，最差情况退化为 Zero-Shot
-- **可解释**：可以直接可视化哪些 patch 被判定为"可匹配"
-- **与之前方法正交**：不修改特征空间，不破坏语义结构
+结果：Precision 从 49%/32% 暴跌至 5-6%。Predictor 不仅没有过滤坏 patch，反而把好 patch 过滤掉了。
+
+**失败根因**：单 patch 的 1024 维特征不包含"我在整张图中有多独特"这个信息。两个白墙 patch 的特征几乎相同，Predictor 无法区分它们。
+
+#### 第六阶段（进行中）：路线 B — Frozen DINO + 注意力匹配头
+
+Route A 的失败揭示了关键事实：**"可匹配性"需要上下文感知**。
+
+路线 B 采用 SuperGlue/LightGlue 风格的注意力架构：
+- Self-Attention：让每个 patch 看到同图所有 patch → 感知独特性
+- Cross-Attention：两图 patch 互相 attend → 消解歧义
+- Dual-Softmax 匹配：替代 MNN 的全局分配策略
+- Backbone 完全冻结 → 零语义破坏
+
+这是本项目理论最完整的方案，也是最后一次尝试。
 
 ---
 
@@ -341,6 +354,8 @@ lmz/
 │   ├── train_robust.py          #   LoRA + StableMatchingLoss 训练脚本
 │   ├── extract_and_match.py     #   Projection Head 特征提取 + MNN
 │   ├── extract_lora.py          #   LoRA 特征提取 + MNN
+│   ├── matchability.py          #   Route A: Matchability Predictor（已废弃）
+│   ├── matching_head.py         #   **Route B: 注意力匹配头（当前方案）**
 │   └── generate_train_pairs.py  #   从 NAVI annotations 生成训练对
 │
 ├── evaluate/                    # 评估
@@ -388,19 +403,19 @@ lmz/
 | **LoRA + Safe Radius** | **ScanNet** | **0.000** | **0.260** | **1.838** | **28.831%** |
 | StableMatchingLoss | NAVI | 0.000 | 0.021 | 0.108 | 5.128% |
 | StableMatchingLoss | ScanNet | 0.044 | 0.261 | 1.433 | 10.975% |
+| Matchability Predictor | NAVI | 0.000 | 0.020 | 0.170 | 5.550% |
+| Matchability Predictor | ScanNet | 0.000 | 0.000 | 0.200 | 5.950% |
 
 ### 数据解读
 
-- **Precision**：满足对极几何约束的匹配点占比。LoRA+Safe Radius 达到了 Zero-Shot 的 90% 水平——证明 Safe Radius 有效地保护了匹配的局部质量。
-- **AUC**：位姿估计的累积误差分布。所有微调模型的 AUC 都接近 0——即使在 Precision 较高时也是如此。这说明即使单个匹配的质量尚可，匹配的整体空间分布已经退化到无法进行位姿估计的程度。
-- **Precision 与 AUC 的分化**恰恰是"对比学习破坏特征空间结构"的最直接证据——模型学会了让更多匹配满足对极几何，但失去了进行精确位姿三角测量所需的空间分布多样性。
+- **Precision**：满足对极几何约束的匹配点占比。LoRA+Safe Radius（28.83%）是目前最接近 Zero-Shot（32.20%）的结果。
+- **AUC**：位姿估计的累积误差分布。所有微调模型的 AUC 都接近 0——位姿估计能力被系统性地摧毁。
+- **Route A** 的失败揭示了关键事实：单 patch 缺乏上下文感知能力。这正是 Route B 引入 Self-Attention 的核心动机。
 
 ---
 
 > **最终结论**
 >
-> DINOv3 的 Zero-Shot 特征已经非常优秀（NAVI Precision 49%，ScanNet 32%）。试图用对比学习在几千对图片上"修正"一个在 1.42 亿张图片上训练出的特征空间，本质上是**用极少的信息去覆盖海量的预训练知识**。无论架构如何精巧、损失函数如何设计、batch size 如何增大，只要核心操作仍然是"拉近对应 patch、推开非对应 patch"，这个操作就在系统性地破坏让 DINOv3 在 Zero-Shot 下就表现良好的那个属性——语义平滑性。
+> DINOv3 的 Zero-Shot 特征已经非常优秀（NAVI Precision 49%，ScanNet 32%）。试图用对比学习对其做几何微调，本质上是**用极少量数据去覆盖海量预训练知识**。六次系统实验全部失败——不是工程实现的问题，而是语义特征与几何匹配之间的本质矛盾。
 >
-> 然而，这不意味着"微调 DINO 以提升匹配精度"完全不可能。本项目提出了**路线 A（Matchability Predictor）**：不修改 DINO 特征，只训练一个极小的筛选器来过滤不可靠的 patch。这个思路绕过了对比学习的根本矛盾，最差情况退化为 Zero-Shot，理论上不存在负优化空间。
->
-> 这是一个"越努力越糟糕"的任务——如果你用错了方法。而证明哪些方法是错的、为什么是错的、以及什么才是对的方向，恰恰是这个项目最大的学术贡献。
+> 路线 A（Matchability Predictor）的失败进一步证明：即使不改特征空间，仅靠单 patch 的语义特征也无法判断匹配价值。路线 B（注意力匹配头）通过 Self-Attention 赋予每个 patch 上下文感知能力，是本项目理论最完整也是最后一次尝试。

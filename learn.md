@@ -507,43 +507,119 @@ Linear(64 → 1) → Sigmoid
 
 参数量：~280K（约占 backbone 的 0.09%），训练极快（< 10 分钟/epoch）。
 
-### 9.4 零风险保证
+### 9.4 零风险保证…及其致命的隐藏缺陷
 
-最差情况：Predictor 输出均匀分数（所有 patch 同样对待）→ 退化为 Zero-Shot。因为 backbone 完全冻结，**不可能比 Zero-Shot 更差**。这是之前所有方法都不具备的保证。
+最差情况：Predictor 输出均匀分数 → 退化为 Zero-Shot。这在理论上是成立的。
 
----
+但实际上 Predictor 在训练中学会了比随机更差的筛选——它把真正好的 patch 过滤掉了，留下了不好的 patch。原因在于它**缺少上下文信息**：一个白墙 patch 之所以匹配失败，不是因为它的 1024 维特征向量"不对"，而是因为图里有几十个和它几乎一样的 patch。**单个 patch 的特征里不包含"还有多少个 patch 和它相似"这个信息**——而这个信息恰恰是判断可匹配性的关键。
 
-## 10. 正确的技术路线
-
-基于本项目的发现，基于 DINOv3 做更好的特征匹配，正确的方法包括：
-
-### 10.1 冻结 Backbone + 可学习匹配头
-
-类似 SuperGlue / LightGlue 的架构：
-- DINOv3 作为不可训练的特征提取器
-- 在特征之上构建注意力匹配网络（cross-attention + self-attention）
-- 匹配头学习"如何匹配 DINO 特征"而非"修改 DINO 特征"
-- 直接优化匹配质量，端到端可微
-
-### 10.2 Matchability 筛选（路线 A）
-
-冻结 backbone，只训练极小的 patch 筛选器。过滤不可靠 patch 后再做 MNN。零风险，零特征破坏。
-
-### 10.3 Zero-Shot 的工程优化（不需要训练）
-
-完全不训练任何东西，只在推理 pipeline 上做改进：
-- SNN ratio test（第二近邻距离比替代 MNN）
-- 多尺度特征融合
-- USAC 参数精调
-- 关键点显著性预筛选
-
-### 10.4 端到端可微匹配
-
-使用 LoFTR、RoMa、MASt3R 等专门为匹配设计的架构。它们在设计上直接优化几何精度，不需要"语义特征适合匹配"这个假设。
+这条教训直接引出了路线 B 的核心设计：**Self-Attention 让 patch 看到整张图的上下文。**
 
 ---
 
-## 11. 核心概念速查表
+## 10. 注意力匹配头（Route B）：不改特征的智能匹配
+
+### 10.1 核心思想
+
+Route A（Matchability Predictor）失败的根因：**单 patch 无法判断自己的独特性**。
+
+解决办法：用 Self-Attention 让每个 patch 看到同一图像的所有其他 patch，从而感知自己在特征分布中的独特性；再用 Cross-Attention 让两个图像的 patch 互相交流，学习跨图对应关系。
+
+```
+DINOv3 (冻结)
+    ↓
+[Linear Projection: 1024 → 256]
+    ↓
+[+ 2D Sinusoidal Positional Encoding]
+    ↓
+[Self-Attention: 每个 patch 看到同图所有 patch → 感知独特性]
+    ↓
+[Cross-Attention: 两图 patch 互相 attend → 消解歧义]
+    ↓
+[Final L2 Normalisation]
+    ↓
+[Dual-Softmax Matching → 匹配输出]
+```
+
+### 10.2 Self-Attention 为什么解决了 Route A 的问题
+
+Route A 的 Predictor：`f_single(desc_i)` → `score_i ∈ [0,1]`
+
+Route B 的 Self-Attention：
+```
+desc_i_new = Σ_j α_{ij} · V(desc_j)
+            where α_{ij} = softmax(Q(desc_i)·K(desc_j) / √d)
+```
+
+每个 patch 的输出是**所有其他 patch 特征的加权和**。如果 patch i 在纹理缺失区域（周围 50 个 patch 都和它长得很像），它的 query 会匹配到很多相似的 key → 注意力分散 → 输出特征被"模糊化" → 区分度降低。反之，如果 patch i 在独特角点上 → 注意力集中在自己身上 → 特征保持锐利。
+
+**这就是"独特性感知"的数学实现——不需要显式标签，注意力架构天然编码了这个信息。**
+
+### 10.3 Cross-Attention：跨图匹配
+
+```
+desc_A_new = CrossAttn(q=desc_A, k=desc_B, v=desc_B)
+```
+
+图 A 的每个 patch 用它的 query 在图 B 的所有 patch 的 key 中搜索最匹配的，然后用 B 的 value 更新自己的特征。整个过程类似 MNN 匹配，但是可微的、多层迭代的、上下文感知的。
+
+经过 4 轮 alternating self/cross attention，模型学会了输出**更适合匹配的 refined descriptor**。
+
+### 10.4 Dual-Softmax 匹配
+
+替代 MNN 的匹配策略：
+
+```
+S = desc_A @ desc_B.T / τ              # Score matrix
+P(i,j) = softmax(S, dim=1)_ij          # P(j|i): each row sums to 1
+         × softmax(S, dim=0)_ij        # P(i|j): each column sums to 1
+```
+
+为什么比 MNN 好：
+- MNN 只看 argmax，忽略"有多确定"的信息
+- Dual softmax 考虑了整行/整列的分布 → 如果一行中有多个高分候选，P(i,j) 都偏低
+- 只有**双向都认为唯一**的匹配才获得高分 → 自然的歧义过滤
+
+### 10.5 与之前所有方法的根本区别
+
+| 维度 | 对比微调 | Route A | **Route B** |
+|------|---------|---------|-----------|
+| 修改特征空间？ | 是（破坏） | 否 | 否 |
+| 上下文感知？ | 否 | 否 | **是（Self-Attention）** |
+| 跨图通信？ | 间接（loss） | 否 | **是（Cross-Attention）** |
+| 匹配策略 | MNN | MNN | **Dual-Softmax** |
+| 训练目标 | 特征相似度 | BCE 分类 | **直接优化匹配分配** |
+| 参数量 | ~0.39M (LoRA) | ~0.28M | **~1M** |
+
+### 10.6 为什么这应该有效
+
+路线 B 不试图回答"这个 patch 好不好"（Route A 的问题），也不试图"修改什么像什么"（对比微调的问题）。它回答的是：
+
+> "给定两张图的全部特征，哪些 patch 应该对应？"
+
+这是**匹配问题本身的数学形式**——Sinkhorn assignment，Optimal Transport，Bipartite Matching。Self-attention 提供上下文特征，Cross-attention 执行匹配，Dual-softmax 产生分配。整个 pipeline 是对匹配问题本身的端到端近似。
+
+---
+
+## 11. 所有尝试方法汇总之下的正确路线
+
+基于六个阶段的系统实验，真正可能有效的方法分层如下：
+
+### 11.1 注意力匹配头（Route B — 当前实现）
+
+参见第 10 节。Self-Attention + Cross-Attention + Dual-Softmax。这是本项目最后一次尝试，理论上是完整匹配范式。
+
+### 11.2 端到端可微匹配（LoFTR/RoMa/MASt3R）
+
+如果 Route B 仍然失败，这意味着基于 DINO 语义特征做几何匹配在根本上就有一个不可逾越的上限。此时需要转向专门为几何匹配设计的端到端可微架构——它们不依赖"语义特征适合匹配"这个假设。
+
+### 11.3 Zero-Shot 工程优化（无需训练）
+
+SNN ratio test、多尺度特征融合、USAC 参数精调——这些完全不涉及训练，可以在任何模型上即插即用。如果 Route B 也失败，这将是唯一现实的短期提升方案。
+
+---
+
+## 12. 核心概念速查表
 
 | 概念 | 定义 | 在本项目中的角色 |
 |------|------|----------------|
@@ -562,7 +638,11 @@ Linear(64 → 1) → Sigmoid
 | Mode Collapse | 特征退化为均匀随机噪声 | InfoNCE 导致的现象 |
 | Safe Radius | 空间距离 mask，排除空间相邻的负样本 | 最有效的改进（Precision 恢复到 28.83%） |
 | StableMatchingLoss | 去 softmax 的复合损失（pos + hardest neg + div + reg） | 仍未能超越 Zero-Shot |
-| Matchability Predictor | 冻结 backbone + 训练 patch 筛选器 | 零风险方案，待测试 |
+| Matchability Predictor | 冻结 backbone + 训练 patch 筛选器 (Route A) | 失败：Precision 降至 5-6%（缺上下文信息） |
+| Self-Attention | patch 关注同图所有 patch 的注意力机制 | Route B 核心：让 patch 感知自身独特性 |
+| Cross-Attention | 两图 patch 互相 attend 的注意力机制 | Route B 核心：可微的跨图匹配 |
+| Dual-Softmax | 双向 softmax + 互检的匹配策略 | Route B：替代 MNN 的分配式匹配 |
+| Matching Head | Self-Attn + Cross-Attn + Dual-Softmax (~1M params) | Route B 完整方案，待测试 |
 
 ---
 

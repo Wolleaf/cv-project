@@ -13,6 +13,16 @@
 
 set -e
 
+# -------- 阶段控制 --------
+SKIP_TRAIN=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-train) SKIP_TRAIN=true ;;
+        --train-only) TRAIN_ONLY=true ;;
+        --eval-only) EVAL_ONLY=true ;;
+    esac
+done
+
 # -------- 配置 --------
 export OMP_NUM_THREADS=8
 CONDA_ENV="llmdevelop"
@@ -71,76 +81,93 @@ echo -e "${GRN}[自检通过]${RST}"
 # =========================================================================
 # Phase 1: 并行训练 (NAVI + ScanNet)
 # =========================================================================
-echo -e "\n${YLW}[1/3] 并行训练 NAVI 和 ScanNet 的 Matchability Predictor...${RST}"
-echo -e "       日志: ${LOG_DIR}/train_navi.log  +  ${LOG_DIR}/train_scannet.log"
-echo -e "       Predictor 仅 ~280K 参数，双任务并行 GPU 绰绰有余"
+if [ "$SKIP_TRAIN" = true ]; then
+    echo -e "\n${YLW}[1/3] 跳过训练 — 使用已有模型${RST}"
+    if [ ! -f "matchability_navi/predictor_best.pth" ]; then
+        echo -e "${RED}[错误] 缺失: matchability_navi/predictor_best.pth${RST}"
+        exit 1
+    fi
+    if [ ! -f "matchability_scannet/predictor_best.pth" ]; then
+        echo -e "${RED}[错误] 缺失: matchability_scannet/predictor_best.pth${RST}"
+        exit 1
+    fi
+    echo -e "${GRN}模型文件检查通过${RST}"
+else
+    echo -e "\n${YLW}[1/3] 并行训练 NAVI 和 ScanNet 的 Matchability Predictor...${RST}"
+    echo -e "       日志: ${LOG_DIR}/train_navi.log  +  ${LOG_DIR}/train_scannet.log"
+    echo -e "       Predictor 仅 ~280K 参数，双任务并行 GPU 绰绰有余"
 
-TRAIN_START=$(date +%s)
+    TRAIN_START=$(date +%s)
 
-# --- NAVI (后台) ---
-conda run -n $CONDA_ENV python -m finetune.matchability train \
-    --checkpoint "$WEIGHTS" \
-    --train_pairs finetune/navi_train_pairs.txt \
-    --data_root full_dataset/navi_v1.5 \
-    --depth_root full_dataset/navi_v1.5 \
-    --output_dir matchability_navi \
-    --epochs $TRAIN_EPOCHS --batch_pairs $TRAIN_BATCH --lr 1e-3 --img_size 448 \
-    > "$LOG_DIR/train_navi.log" 2>&1 &
-PID_NAVI=$!
+    # --- NAVI (后台) ---
+    conda run -n $CONDA_ENV python -m finetune.matchability train \
+        --checkpoint "$WEIGHTS" \
+        --train_pairs finetune/navi_train_pairs.txt \
+        --data_root full_dataset/navi_v1.5 \
+        --depth_root full_dataset/navi_v1.5 \
+        --output_dir matchability_navi \
+        --epochs $TRAIN_EPOCHS --batch_pairs $TRAIN_BATCH --lr 1e-3 --img_size 448 \
+        > "$LOG_DIR/train_navi.log" 2>&1 &
+    PID_NAVI=$!
 
-# --- ScanNet (后台) ---
-conda run -n $CONDA_ENV python -m finetune.matchability train \
-    --checkpoint "$WEIGHTS" \
-    --train_pairs datasets/scannet_with_gt.txt \
-    --data_root datasets/test \
-    --output_dir matchability_scannet \
-    --epochs $TRAIN_EPOCHS --batch_pairs $TRAIN_BATCH --lr 1e-3 --img_size 448 \
-    > "$LOG_DIR/train_scannet.log" 2>&1 &
-PID_SCANNET=$!
+    # --- ScanNet (后台) ---
+    conda run -n $CONDA_ENV python -m finetune.matchability train \
+        --checkpoint "$WEIGHTS" \
+        --train_pairs datasets/scannet_with_gt.txt \
+        --data_root datasets/test \
+        --output_dir matchability_scannet \
+        --epochs $TRAIN_EPOCHS --batch_pairs $TRAIN_BATCH --lr 1e-3 --img_size 448 \
+        > "$LOG_DIR/train_scannet.log" 2>&1 &
+    PID_SCANNET=$!
 
-# 实时显示进度
-echo -e "\n  等待两个训练任务完成..."
-while kill -0 $PID_NAVI 2>/dev/null || kill -0 $PID_SCANNET 2>/dev/null; do
-    N_DONE=""
-    S_DONE=""
-    kill -0 $PID_NAVI 2>/dev/null && N_DONE="训练中" || N_DONE="${GRN}完成${RST}"
-    kill -0 $PID_SCANNET 2>/dev/null && S_DONE="训练中" || S_DONE="${GRN}完成${RST}"
-    echo -ne "\r  NAVI: $N_DONE  |  ScanNet: $S_DONE  "
-    sleep 2
-done
-echo ""
+    # 实时显示进度
+    echo -e "\n  等待两个训练任务完成..."
+    while kill -0 $PID_NAVI 2>/dev/null || kill -0 $PID_SCANNET 2>/dev/null; do
+        N_DONE=""
+        S_DONE=""
+        kill -0 $PID_NAVI 2>/dev/null && N_DONE="训练中" || N_DONE="${GRN}完成${RST}"
+        kill -0 $PID_SCANNET 2>/dev/null && S_DONE="训练中" || S_DONE="${GRN}完成${RST}"
+        echo -ne "\r  NAVI: $N_DONE  |  ScanNet: $S_DONE  "
+        sleep 2
+    done
+    echo ""
 
-# 检查是否有失败
-wait $PID_NAVI; NAVI_EXIT=$?
-wait $PID_SCANNET; SCANNET_EXIT=$?
+    # 检查是否有失败
+    wait $PID_NAVI; NAVI_EXIT=$?
+    wait $PID_SCANNET; SCANNET_EXIT=$?
 
-TRAIN_END=$(date +%s)
-TRAIN_ELAPSED=$((TRAIN_END - TRAIN_START))
+    TRAIN_END=$(date +%s)
+    TRAIN_ELAPSED=$((TRAIN_END - TRAIN_START))
 
-echo -e "\n${GRN}训练完成！${RST} 耗时 ${TRAIN_ELAPSED}s (并行执行)"
+    echo -e "\n${GRN}训练完成！${RST} 耗时 ${TRAIN_ELAPSED}s (并行执行)"
 
-if [ $NAVI_EXIT -ne 0 ]; then
-    echo -e "${RED}[错误] NAVI 训练失败，查看日志: ${LOG_DIR}/train_navi.log${RST}"
-    tail -20 "$LOG_DIR/train_navi.log"
-    exit 1
+    if [ $NAVI_EXIT -ne 0 ]; then
+        echo -e "${RED}[错误] NAVI 训练失败，查看日志: ${LOG_DIR}/train_navi.log${RST}"
+        tail -20 "$LOG_DIR/train_navi.log"
+        exit 1
+    fi
+    if [ $SCANNET_EXIT -ne 0 ]; then
+        echo -e "${RED}[错误] ScanNet 训练失败，查看日志: ${LOG_DIR}/train_scannet.log${RST}"
+        tail -20 "$LOG_DIR/train_scannet.log"
+        exit 1
+    fi
+
+    # 快速展示训练结果
+    echo ""
+    echo "NAVI 训练最终 loss:"
+    grep "Epoch" "$LOG_DIR/train_navi.log" | tail -3
+    echo ""
+    echo "ScanNet 训练最终 loss:"
+    grep "Epoch" "$LOG_DIR/train_scannet.log" | tail -3
 fi
-if [ $SCANNET_EXIT -ne 0 ]; then
-    echo -e "${RED}[错误] ScanNet 训练失败，查看日志: ${LOG_DIR}/train_scannet.log${RST}"
-    tail -20 "$LOG_DIR/train_scannet.log"
-    exit 1
-fi
-
-# 快速展示训练结果
-echo ""
-echo "NAVI 训练最终 loss:"
-grep "Epoch" "$LOG_DIR/train_navi.log" | tail -3
-echo ""
-echo "ScanNet 训练最终 loss:"
-grep "Epoch" "$LOG_DIR/train_scannet.log" | tail -3
 
 # =========================================================================
 # Phase 2: 并行提取 + 评估 (NAVI + ScanNet 同时跑)
 # =========================================================================
+if [ "$SKIP_TRAIN" = true ]; then
+    TRAIN_START=$(date +%s)  # for total time tracking in Phase 3
+fi
+
 echo -e "\n${YLW}[2/3] 并行提取特征 + 评估 (测试 5 个 keep_ratio)...${RST}"
 
 EXTRACT_START=$(date +%s)
